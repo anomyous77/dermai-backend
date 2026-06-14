@@ -15,6 +15,7 @@ from PIL import Image
 import io
 import uvicorn
 import os
+import traceback
 
 app = FastAPI(
     title="DermAI - Skin Disease Detection API",
@@ -44,6 +45,7 @@ CONSULTATION_REQUIRED = {"critical", "high"}
 
 MODEL_PATH = os.getenv("MODEL_PATH", "models/HAM10000_Xception.keras")
 model = None
+model_error = None
 
 
 def focal_loss(gamma=2.0, alpha=0.25):
@@ -59,19 +61,37 @@ def focal_loss(gamma=2.0, alpha=0.25):
 
 @app.on_event("startup")
 async def load_ml_model():
-    global model
+    global model, model_error
 
     try:
+        print(f"🔍 Checking model path: {MODEL_PATH}")
+        print(f"📁 Current directory: {os.getcwd()}")
+        print(f"📁 Models folder exists: {os.path.exists('models')}")
+        print(f"📄 Model file exists: {os.path.exists(MODEL_PATH)}")
+
+        if os.path.exists(MODEL_PATH):
+            print(f"📦 Model file size: {os.path.getsize(MODEL_PATH) / (1024 * 1024):.2f} MB")
+
         model = load_model(
             MODEL_PATH,
-            custom_objects={"focal_loss": focal_loss()},
+            custom_objects={
+                "focal_loss": focal_loss(),
+                "loss": focal_loss(),
+            },
             compile=False,
+            safe_mode=False,
         )
+
+        model_error = None
         print(f"✅ Model loaded successfully from {MODEL_PATH}")
+
     except Exception as e:
         model = None
+        model_error = str(e)
         print(f"❌ Failed to load model: {e}")
-        print(f"   Expected model path: {MODEL_PATH}")
+        print("===== FULL MODEL LOAD ERROR =====")
+        traceback.print_exc()
+        print("=================================")
 
 
 def preprocess_image(img: Image.Image) -> np.ndarray:
@@ -106,6 +126,7 @@ async def health_check():
         "status": "healthy",
         "model_loaded": model is not None,
         "model_path": MODEL_PATH,
+        "model_error": model_error,
         "version": "1.0.0",
     }
 
@@ -113,7 +134,10 @@ async def health_check():
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     if model is None:
-        raise HTTPException(status_code=503, detail="ML model not loaded")
+        raise HTTPException(
+            status_code=503,
+            detail=f"ML model not loaded. Error: {model_error}",
+        )
 
     if file.content_type is None or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
